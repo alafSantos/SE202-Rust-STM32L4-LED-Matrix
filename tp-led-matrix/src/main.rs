@@ -11,18 +11,14 @@ use stm32l4xx_hal::prelude::*;
 use stm32l4xx_hal::serial::{Config, Event, Rx, Serial};
 use tp_led_matrix::{matrix::Matrix, Image};
 
-use embedded_graphics::prelude::Primitive;
+use ibm437::IBM437_8X8_REGULAR;
+
 use embedded_graphics::{
-    pixelcolor::RgbColor,
-    prelude::*,
-    primitives::{Circle, PrimitiveStyleBuilder, Rectangle, Triangle},
+    mono_font::MonoTextStyleBuilder, pixelcolor::Rgb888, prelude::*, text::Text,
 };
 
 #[rtic::app(device = stm32l4xx_hal::pac, dispatchers = [USART2, USART3])]
 mod app {
-
-    use embedded_graphics::pixelcolor::Rgb888;
-
     use super::*;
 
     #[monotonic(binds = SysTick, default = true)]
@@ -238,68 +234,48 @@ mod app {
         })
     }
 
-    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0, shape_index: u8 = 0], shared = [next_image, &pool, changes], priority=2)]
+    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0, offset: i32 = 10], shared = [next_image, &pool, changes], priority=2)]
     fn screensaver(mut cx: screensaver::Context, at: Instant) {
         let last_changes: &mut u32 = cx.local.last_changes;
         let color_index: &mut u8 = cx.local.color_index as &mut u8;
-        let shape_index: &mut u8 = cx.local.shape_index as &mut u8;
+        let offset: &mut i32 = cx.local.offset as &mut i32;
+        let text = "Hello SE202";
 
-        let color_now = if *color_index == 0 {
-            Rgb888::RED
-        } else if *color_index == 1 {
-            Rgb888::GREEN
-        } else {
-            Rgb888::BLUE
+        let color_now = match *color_index {
+            0 => Rgb888::RED,
+            1 => Rgb888::GREEN,
+            _ => Rgb888::BLUE,
         };
 
         cx.shared.changes.lock(|changes| {
             cx.shared.next_image.lock(|next_image| {
                 if *last_changes == *changes {
                     let mut image_aux = Image::default();
-                    let mut _shape;
+                    let mut _text;
 
-                    // Rectangle, Triangle, Circle
-                    if *shape_index == 0 {
-                        _shape = Rectangle::new(Point::new(0, 0),  Size::new(8, 8))
-                            .into_styled(
-                                PrimitiveStyleBuilder::new()
-                                    .stroke_color(color_now)
-                                    .stroke_width(1)
-                                    .fill_color(Rgb888::BLACK)
-                                    .build(),
-                            )
-                            .draw(&mut image_aux);
-                    } else if *shape_index == 1 {
-                        _shape = Triangle::new(Point::new(0, 0), Point::new(7, 7), Point::new(7, 0))
-                            .into_styled(
-                                PrimitiveStyleBuilder::new()
-                                    .stroke_color(color_now)
-                                    .stroke_width(1)
-                                    .fill_color(Rgb888::BLACK)
-                                    .build(),
-                            )
-                            .draw(&mut image_aux);
-                    } else {
-                        _shape = Circle::new(Point::new(0, 0), 8)
-                            .into_styled(
-                                PrimitiveStyleBuilder::new()
-                                    .stroke_color(color_now)
-                                    .stroke_width(1)
-                                    .fill_color(Rgb888::BLACK)
-                                    .build(),
-                            )
-                            .draw(&mut image_aux);
-                    }
+                    // Create a new text style
+                    let text_style = MonoTextStyleBuilder::new()
+                        .font(&IBM437_8X8_REGULAR)
+                        .text_color(color_now)
+                        .background_color(Rgb888::BLACK)
+                        .build();
+
+                    // Create a new text object
+                    let text = Text::new(text, Point::new(*offset, 7), text_style);
+
+                    // Draw the text onto the image
+                    _text = text.draw(&mut image_aux);
 
                     let image = cx.shared.pool.alloc().unwrap().init(image_aux);
                     *next_image = Some(image);
 
-                    *color_index = (*color_index + 1) % 3;
-
-                    if *color_index == 2 {
-                        *shape_index = (*shape_index + 1) % 3;
+                    *offset = *offset - 1;
+                    if *offset == -90 {
+                        *offset = 10; // reseting offset
+                        *color_index = (*color_index + 1) % 3;
                     }
                 } else {
+                    *offset = 10; // reseting offset
                     if let Some(image) = next_image.take() {
                         cx.shared.pool.free(image);
                     }
@@ -308,7 +284,7 @@ mod app {
             });
         });
 
-        let next = at + 1.secs();
+        let next = at + 60.millis();
         screensaver::spawn_at(next, next).unwrap();
     }
 }
