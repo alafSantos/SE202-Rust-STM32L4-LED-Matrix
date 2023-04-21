@@ -1,8 +1,10 @@
 #![no_std]
 #![no_main]
 
+use core::mem::MaybeUninit;
 use defmt_rtt as _;
 use dwt_systick_monotonic::{DwtSystick, ExtU32};
+use heapless::pool::{Box, Node, Pool};
 use panic_probe as _;
 use stm32l4xx_hal::pac::USART1;
 use stm32l4xx_hal::prelude::*;
@@ -11,6 +13,8 @@ use tp_led_matrix::{matrix::Matrix, Image};
 
 #[rtic::app(device = stm32l4xx_hal::pac, dispatchers = [USART2, USART3])]
 mod app {
+    use tp_led_matrix::Color;
+
     use super::*;
 
     #[monotonic(binds = SysTick, default = true)]
@@ -19,14 +23,17 @@ mod app {
 
     #[shared]
     struct Shared {
-        image: Image,
+        next_image: Option<Box<Image>>,
+        pool: Pool<Image>,
+        changes: u32,
     }
 
     #[local]
     struct Local {
         matrix: Matrix,
         usart1_rx: Rx<USART1>,
-        next_image: Image,
+        current_image: Box<Image>,
+        rx_image: Box<Image>,
     }
 
     #[init]
@@ -73,10 +80,9 @@ mod app {
             clocks,
         );
 
-        let image = Image::default();
-
         // the display task gets spawned after init() terminates
         display::spawn(mono.now()).unwrap();
+        screensaver::spawn(mono.now()).unwrap();
 
         // Serial port
         let tx_pin =
@@ -104,16 +110,30 @@ mod app {
         let data = serial.split();
         let usart1_rx = data.1;
 
-        //
-        let next_image = Image::default();
+        // Triple buffering (inside pool)
+        let pool: Pool<Image> = Pool::new();
+        unsafe {
+            static mut MEMORY: MaybeUninit<[Node<Image>; 3]> = MaybeUninit::uninit();
+            pool.grow_exact(&mut MEMORY); // static mut access is unsafe
+        }
+
+        let current_image = pool.alloc().unwrap().init(Image::default());
+        let rx_image = pool.alloc().unwrap().init(Image::default()); // MaybeUninit::init
+        let next_image = None;
+        let changes = 0;
 
         // Return the resources and the monotonic timer
         return (
-            Shared { image },
+            Shared {
+                next_image,
+                pool,
+                changes,
+            },
             Local {
                 matrix,
                 usart1_rx,
-                next_image,
+                current_image,
+                rx_image,
             },
             init::Monotonics(mono),
         );
@@ -124,18 +144,30 @@ mod app {
         loop {}
     }
 
-    #[task(local = [matrix, next_row: usize = 0], shared = [image], priority = 2)]
+    #[task(local = [matrix, next_row: usize = 0, current_image], shared = [&pool, next_image], priority = 2)]
     fn display(mut cx: display::Context, at: Instant) {
         // Display line next_line (cx.local.next_line) of
         // the image (cx.local.image) on the matrix (cx.local.matrix).
         // All those are mutable references.
-        cx.shared.image.lock(|image| {
-            // Here you can use image, which is a &mut Image,
-            // to display the appropriate row
-            cx.local
-                .matrix
-                .send_row(*cx.local.next_row, image.row(*cx.local.next_row));
-        });
+        // cx.local.current_image.lock(|current| {
+        // Here you can use image, which is a &mut Image,
+        // to display the appropriate row
+        cx.local.matrix.send_row(
+            *cx.local.next_row,
+            cx.local.current_image.row(*cx.local.next_row),
+        );
+
+        if *cx.local.next_row as usize == 7 {
+            cx.shared.next_image.lock(|next_image| {
+                if next_image.is_none() == false {
+                    if let Some(mut image) = next_image.take() {
+                        core::mem::swap(&mut image, cx.local.current_image.into());
+                        cx.shared.pool.free(image);
+                    }
+                }
+            })
+        }
+        // });
 
         // Increment next_row up to 7 and wraparound to 0
         *cx.local.next_row = (*cx.local.next_row + 1) % 8;
@@ -145,40 +177,92 @@ mod app {
         display::spawn_at(next, next).unwrap();
     }
 
-    #[task(binds = USART1, local = [usart1_rx, next_image, next_pos: usize = 0],shared = [image])]
+    #[task(binds = USART1, local = [usart1_rx, next_pos: usize = 0, rx_image], shared = [next_image, &pool])]
     fn receive_byte(mut cx: receive_byte::Context) {
-        let next_image: &mut Image = cx.local.next_image;
         let next_pos: &mut usize = cx.local.next_pos;
-        let Ok(b) = cx.local.usart1_rx.read() else { return };
-        // Handle the incoming byte according to the SE203 protocol
-        // and update next_image
-        // Do not forget that next_image.as_mut() might be handy here!
-        let error = cx.local.usart1_rx.check_for_error();
-        match error {
-            Ok(()) => {
-                defmt::info!("Ok");
-            },
-            Err(_error) => {
-                return;
-            },
-        }
-        if b == 0xff || *next_pos >= 8 * 8 * 3 {
-            *next_pos = 0;
-        } else {
-            next_image.as_mut()[*next_pos] = b;
-            *next_pos += 1;
-        }
 
-        // If the received image is complete, make it available to
-        // the display task.
-        if *next_pos == 8 * 8 * 3 {
-            cx.shared.image.lock(|image| {
-                // Replace the image content by the new one, for example
-                // by swapping them, and reset next_pos
-                // core::mem::swap(image, next_image);
-                core::mem::swap(image, next_image);
+        if let Ok(b) = cx.local.usart1_rx.read() {
+            let error = cx.local.usart1_rx.check_for_error();
+            match error {
+                Ok(()) => {
+                    defmt::info!("Ok");
+                }
+                Err(_error) => {
+                    return;
+                }
+            }
+            if b == 0xff {
                 *next_pos = 0;
-            });
+            } else if *next_pos == usize::MAX {
+                // blocking untill arriving of a new image
+            } else if let Some(image) = cx.local.rx_image.into() {
+                image.as_mut()[*next_pos] = b;
+                *next_pos += 1;
+            } else {
+                defmt::error!("Error while reading incoming data");
+            }
+
+            // If the received image is complete, make it available to
+            // the display task.
+            if *next_pos == 8 * 8 * 3 {
+                cx.shared.next_image.lock(|next_image| {
+                    if next_image.is_none() != false {
+                        if let Some(image) = next_image.take() {
+                            cx.shared.pool.free(image);
+                        }
+                    }
+                    // Replace the image content by the new one, for example
+                    // by swapping them, and reset next_pos
+                    let mut future_image = cx.shared.pool.alloc().unwrap().init(Image::default());
+                    core::mem::swap(&mut future_image, &mut cx.local.rx_image);
+                    *next_image = Some(future_image);
+                    notice_change::spawn().unwrap();
+                });
+                *next_pos = usize::MAX;
+            }
         }
+    }
+
+    #[task(shared = [changes], priority = 3)]
+    fn notice_change(mut cx: notice_change::Context) {
+        cx.shared.changes.lock(|changes| {
+            *changes = (*changes + 1) % (2u32.pow(32) - 1);
+        })
+    }
+
+    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0], shared = [next_image, &pool, changes], priority=2)]
+    fn screensaver(mut cx: screensaver::Context, at: Instant) {
+        let last_changes: &mut u32 = cx.local.last_changes;
+        let color_index: &mut u8 = cx.local.color_index as &mut u8;
+        let color_now = if *color_index == 0 {
+            Color::RED
+        } else if *color_index == 1 {
+            Color::GREEN
+        } else {
+            Color::BLUE
+        };
+
+        cx.shared.changes.lock(|changes| {
+            cx.shared.next_image.lock(|next_image| {
+                if *last_changes == *changes {
+                    let gradient = cx
+                        .shared
+                        .pool
+                        .alloc()
+                        .unwrap()
+                        .init(Image::gradient(color_now));
+                    *next_image = Some(gradient);
+                    *color_index = (*color_index + 1) % 3;
+                } else {
+                    if let Some(image) = next_image.take() {
+                        cx.shared.pool.free(image);
+                    }
+                    *last_changes = *changes;
+                }
+            });
+        });
+
+        let next = at + 1.secs();
+        screensaver::spawn_at(next, next).unwrap();
     }
 }

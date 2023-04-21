@@ -490,6 +490,7 @@ dependencies = [
  "defmt",
  "defmt-rtt",
  "dwt-systick-monotonic",
+ "heapless",
  "micromath",
  "panic-probe",
  "stm32l4xx-hal",
