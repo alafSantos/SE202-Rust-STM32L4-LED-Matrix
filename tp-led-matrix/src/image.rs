@@ -1,5 +1,5 @@
 use crate::gamma;
-use core::ops::{Mul};
+use core::ops::Mul;
 
 #[repr(C)] // Force Rust to use a C compatible representation for Color
 #[derive(Copy, Clone, Default)]
@@ -23,6 +23,7 @@ impl Color {
     }
 }
 
+// In order to check the range
 fn range_dealer(x: usize) -> u8 {
     if x <= 255 {
         return x as u8;
@@ -89,16 +90,16 @@ impl Default for Image {
 impl core::ops::Index<(usize, usize)> for Image {
     type Output = Color;
     fn index(&self, index: (usize, usize)) -> &Self::Output {
-        // since Image has 64 positions in one dimention,
-        // we convert a ideal matrix ixj to an one dimention array by doing 8*i + j
+        /* Since Image has 64 positions in one dimention,
+           we convert a ideal matrix ixj to an one dimention array by doing 8*i + j */
         return &self.0[8 * index.0 + index.1];
     }
 }
 
 impl core::ops::IndexMut<(usize, usize)> for Image {
     fn index_mut(&mut self, index: (usize, usize)) -> &mut Self::Output {
-        // since Image has 64 positions in one dimention,
-        // we convert a ideal matrix ixj to an one dimention array by doing 8*i + j
+        /* Since Image has 64 positions in one dimention,
+           we convert a ideal matrix ixj to an one dimention array by doing 8*i + j */
         return &mut self.0[8 * index.0 + index.1];
     }
 }

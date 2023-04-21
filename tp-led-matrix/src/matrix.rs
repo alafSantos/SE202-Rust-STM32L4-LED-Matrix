@@ -109,7 +109,7 @@ impl Matrix {
                 .set_speed(VeryHigh),
         };
 
-        // attend au moins 100ms que le DM163 soit initialisé, puis passe RST à l'état haut.
+        // Attend au moins 100ms que le DM163 soit initialisé, puis passe RST à l'état haut.
         stm32l4xx_hal::delay::DelayCM::new(clocks).delay_ms(100 as u32);
         init.rst.set_high();
         init.init_bank0();
@@ -142,7 +142,7 @@ impl Matrix {
             5 => self.c5.set_state(state),
             6 => self.c6.set_state(state),
             7 => self.c7.set_state(state),
-            _ => panic!("Unrecognised row! {row}"),
+            _ => unreachable!(),
         };
     }
 
@@ -156,6 +156,7 @@ impl Matrix {
         }
     }
 
+    // Turn off the rows
     fn deactivate_rows(&mut self) {
         self.row(0, PinState::Low);
         self.row(1, PinState::Low);
@@ -178,10 +179,10 @@ impl Matrix {
             color_aux = pixel.gamma_correct();
 
             self.send_byte(color_aux.b);
-            self.send_byte(color_aux.g);
             if i == 4 {
                 self.deactivate_rows();
             }
+            self.send_byte(color_aux.g);
             self.send_byte(color_aux.r);
             i += 1;
         }

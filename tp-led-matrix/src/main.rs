@@ -5,13 +5,11 @@ use core::mem::MaybeUninit;
 use defmt_rtt as _;
 use dwt_systick_monotonic::{DwtSystick, ExtU32};
 use heapless::pool::{Box, Node, Pool};
-use panic_probe as _;
-use stm32l4xx_hal::pac::USART1;
-use stm32l4xx_hal::prelude::*;
-use stm32l4xx_hal::serial::{Config, Event, Rx, Serial};
-use tp_led_matrix::{matrix::Matrix, Image};
-
 use ibm437::IBM437_8X8_REGULAR;
+use panic_probe as _;
+use stm32l4xx_hal::serial::{Config, Event, Rx, Serial};
+use stm32l4xx_hal::{pac::USART1, prelude::*};
+use tp_led_matrix::{matrix::Matrix, Image};
 
 use embedded_graphics::{
     mono_font::MonoTextStyleBuilder, pixelcolor::Rgb888, prelude::*, text::Text,
@@ -84,10 +82,6 @@ mod app {
             clocks,
         );
 
-        // the display task gets spawned after init() terminates
-        display::spawn(mono.now()).unwrap();
-        screensaver::spawn(mono.now()).unwrap();
-
         // Serial port
         let tx_pin =
             gpiob
@@ -125,6 +119,10 @@ mod app {
         let rx_image = pool.alloc().unwrap().init(Image::default());
         let next_image = None;
         let changes = 0;
+
+        // The display task gets spawned after init() terminates
+        display::spawn(mono.now()).unwrap();
+        screensaver::spawn(mono.now()).unwrap();
 
         // Return the resources and the monotonic timer
         return (
@@ -169,7 +167,7 @@ mod app {
         // Increment next_row up to 7 and wraparound to 0
         *cx.local.next_row = (*cx.local.next_row + 1) % 8;
 
-        // it gets respawned
+        // It gets respawned
         let next = at + (1.secs() / 8 / 60);
         display::spawn_at(next, next).unwrap();
     }
@@ -238,10 +236,13 @@ mod app {
         let last_changes: &mut u32 = cx.local.last_changes;
         let color_index: &mut u8 = cx.local.color_index as &mut u8;
         let offset: &mut i32 = cx.local.offset as &mut i32;
-        let offset_min: i32 = -90;
-        let offset_max: i32 = 10;
-        let text = "Hello SE202";
+        // let text = "Hello SE202";
+        let text = "This Rust SE202 project will get me a good grade?";
+        let text_size = text.len() as i32;
+        let offset_max: i32 = 8; // offset based on the time of one letter
+        let offset_min: i32 = -1 * offset_max * text_size; // generic code based on the display time of each letter
         let mut changes = 0;
+        let next;
 
         cx.shared.changes.lock(|changes_| {
             changes = *changes_;
@@ -249,8 +250,8 @@ mod app {
 
         if *last_changes == changes {
             let mut image_aux = Image::default();
-            let mut _text;
 
+            // Selecting color based on the index
             let color_now = match *color_index {
                 0 => Rgb888::RED,
                 1 => Rgb888::GREEN,
@@ -266,24 +267,21 @@ mod app {
                 .build();
 
             // Create a new text object
-            let text = Text::new(text, Point::new(*offset, 7), text_style);
+            let text = Text::new(text, Point::new(*offset, 6), text_style);
 
             // Draw the text onto the image
-            _text = text.draw(&mut image_aux);
+            let _text = text.draw(&mut image_aux);
 
             let image = cx.shared.pool.alloc();
             if image.is_some() {
                 let image = image.unwrap().init(image_aux);
 
-                // returning the previous next_image to the pool
+                // Returning the previous next_image to the pool
                 cx.shared.next_image.lock(|next_image| {
                     if let Some(image) = next_image.take() {
                         cx.shared.pool.free(image);
                     }
-                });
-
-                cx.shared.next_image.lock(|next_image| {
-                    *next_image = Some(image);
+                    *next_image = Some(image); // getting next image
                 });
 
                 *offset = *offset - 1;
@@ -292,15 +290,12 @@ mod app {
                     *color_index = (*color_index + 1) % 3;
                 }
             }
+            next = at + 60.millis(); // if no received byte, it gets called every 60ms
         } else {
             *offset = offset_max; // reseting offset
             *last_changes = changes; // record the current changes into last_changes
-            let next = at + 1.secs(); // wait 1 second after 1 byte received to restart the screensaver (better for the eyes)
-            screensaver::spawn_at(next, next).unwrap();
-            return;
+            next = at + 1.secs(); // wait 1 second after last received byte to restart the screensaver (better for the eyes)
         }
-
-        let next = at + 60.millis();
         screensaver::spawn_at(next, next).unwrap();
     }
 }
