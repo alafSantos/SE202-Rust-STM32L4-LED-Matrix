@@ -11,9 +11,17 @@ use stm32l4xx_hal::prelude::*;
 use stm32l4xx_hal::serial::{Config, Event, Rx, Serial};
 use tp_led_matrix::{matrix::Matrix, Image};
 
+use embedded_graphics::prelude::Primitive;
+use embedded_graphics::{
+    pixelcolor::RgbColor,
+    prelude::*,
+    primitives::{Circle, PrimitiveStyleBuilder, Rectangle, Triangle},
+};
+
 #[rtic::app(device = stm32l4xx_hal::pac, dispatchers = [USART2, USART3])]
 mod app {
-    use tp_led_matrix::Color;
+
+    use embedded_graphics::pixelcolor::Rgb888;
 
     use super::*;
 
@@ -118,7 +126,7 @@ mod app {
         }
 
         let current_image = pool.alloc().unwrap().init(Image::default());
-        let rx_image = pool.alloc().unwrap().init(Image::default()); // MaybeUninit::init
+        let rx_image = pool.alloc().unwrap().init(Image::default());
         let next_image = None;
         let changes = 0;
 
@@ -230,29 +238,67 @@ mod app {
         })
     }
 
-    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0], shared = [next_image, &pool, changes], priority=2)]
+    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0, shape_index: u8 = 0], shared = [next_image, &pool, changes], priority=2)]
     fn screensaver(mut cx: screensaver::Context, at: Instant) {
         let last_changes: &mut u32 = cx.local.last_changes;
         let color_index: &mut u8 = cx.local.color_index as &mut u8;
+        let shape_index: &mut u8 = cx.local.shape_index as &mut u8;
+
         let color_now = if *color_index == 0 {
-            Color::RED
+            Rgb888::RED
         } else if *color_index == 1 {
-            Color::GREEN
+            Rgb888::GREEN
         } else {
-            Color::BLUE
+            Rgb888::BLUE
         };
 
         cx.shared.changes.lock(|changes| {
             cx.shared.next_image.lock(|next_image| {
                 if *last_changes == *changes {
-                    let gradient = cx
-                        .shared
-                        .pool
-                        .alloc()
-                        .unwrap()
-                        .init(Image::gradient(color_now));
-                    *next_image = Some(gradient);
+                    let mut image_aux = Image::default();
+                    let mut _shape;
+
+                    // Rectangle, Triangle, Circle
+                    if *shape_index == 0 {
+                        _shape = Rectangle::new(Point::new(0, 0),  Size::new(8, 8))
+                            .into_styled(
+                                PrimitiveStyleBuilder::new()
+                                    .stroke_color(color_now)
+                                    .stroke_width(1)
+                                    .fill_color(Rgb888::BLACK)
+                                    .build(),
+                            )
+                            .draw(&mut image_aux);
+                    } else if *shape_index == 1 {
+                        _shape = Triangle::new(Point::new(0, 0), Point::new(7, 7), Point::new(7, 0))
+                            .into_styled(
+                                PrimitiveStyleBuilder::new()
+                                    .stroke_color(color_now)
+                                    .stroke_width(1)
+                                    .fill_color(Rgb888::BLACK)
+                                    .build(),
+                            )
+                            .draw(&mut image_aux);
+                    } else {
+                        _shape = Circle::new(Point::new(0, 0), 8)
+                            .into_styled(
+                                PrimitiveStyleBuilder::new()
+                                    .stroke_color(color_now)
+                                    .stroke_width(1)
+                                    .fill_color(Rgb888::BLACK)
+                                    .build(),
+                            )
+                            .draw(&mut image_aux);
+                    }
+
+                    let image = cx.shared.pool.alloc().unwrap().init(image_aux);
+                    *next_image = Some(image);
+
                     *color_index = (*color_index + 1) % 3;
+
+                    if *color_index == 2 {
+                        *shape_index = (*shape_index + 1) % 3;
+                    }
                 } else {
                     if let Some(image) = next_image.take() {
                         cx.shared.pool.free(image);
