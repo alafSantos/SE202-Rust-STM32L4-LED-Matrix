@@ -150,12 +150,6 @@ mod app {
 
     #[task(local = [matrix, next_row: usize = 0, current_image], shared = [&pool, next_image], priority = 2)]
     fn display(mut cx: display::Context, at: Instant) {
-        // Display line next_line (cx.local.next_line) of
-        // the image (cx.local.image) on the matrix (cx.local.matrix).
-        // All those are mutable references.
-        // cx.local.current_image.lock(|current| {
-        // Here you can use image, which is a &mut Image,
-        // to display the appropriate row
         cx.local.matrix.send_row(
             *cx.local.next_row,
             cx.local.current_image.row(*cx.local.next_row),
@@ -171,7 +165,6 @@ mod app {
                 }
             })
         }
-        // });
 
         // Increment next_row up to 7 and wraparound to 0
         *cx.local.next_row = (*cx.local.next_row + 1) % 8;
@@ -181,7 +174,7 @@ mod app {
         display::spawn_at(next, next).unwrap();
     }
 
-    #[task(binds = USART1, local = [usart1_rx, next_pos: usize = 0, rx_image], shared = [next_image, &pool])]
+    #[task(binds = USART1, local = [usart1_rx, next_pos: usize = 0, rx_image], shared = [next_image, &pool], priority = 2)]
     fn receive_byte(mut cx: receive_byte::Context) {
         let next_pos: &mut usize = cx.local.next_pos;
 
@@ -217,9 +210,12 @@ mod app {
                     }
                     // Replace the image content by the new one, for example
                     // by swapping them, and reset next_pos
-                    let mut future_image = cx.shared.pool.alloc().unwrap().init(Image::default());
-                    core::mem::swap(&mut future_image, &mut cx.local.rx_image);
-                    *next_image = Some(future_image);
+                    let future_image = cx.shared.pool.alloc();
+                    if future_image.is_some() {
+                        let mut future_image = future_image.unwrap().init(Image::default());
+                        core::mem::swap(&mut future_image, &mut cx.local.rx_image);
+                        *next_image = Some(future_image);
+                    }
                     notice_change::spawn().unwrap();
                 });
                 *next_pos = usize::MAX;
@@ -227,62 +223,82 @@ mod app {
         }
     }
 
-    #[task(shared = [changes], priority = 3)]
+    #[task(shared = [changes], priority = 1)]
     fn notice_change(mut cx: notice_change::Context) {
-        cx.shared.changes.lock(|changes| {
-            *changes = (*changes + 1) % (2u32.pow(32) - 1);
-        })
+        cx.shared
+            .changes
+            .lock(|changes| match u32::checked_add(*changes, 1) {
+                Some(val) => *changes = val,
+                None => return,
+            })
     }
 
-    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0, offset: i32 = 10], shared = [next_image, &pool, changes], priority=2)]
+    #[task(local = [last_changes: u32 = 0, color_index: u8 = 0, offset: i32 = 10], shared = [next_image, &pool, changes], priority = 1)]
     fn screensaver(mut cx: screensaver::Context, at: Instant) {
         let last_changes: &mut u32 = cx.local.last_changes;
         let color_index: &mut u8 = cx.local.color_index as &mut u8;
         let offset: &mut i32 = cx.local.offset as &mut i32;
+        let offset_min: i32 = -90;
+        let offset_max: i32 = 10;
         let text = "Hello SE202";
+        let mut changes = 0;
 
-        let color_now = match *color_index {
-            0 => Rgb888::RED,
-            1 => Rgb888::GREEN,
-            _ => Rgb888::BLUE,
-        };
+        cx.shared.changes.lock(|changes_| {
+            changes = *changes_;
+        });
 
-        cx.shared.changes.lock(|changes| {
-            cx.shared.next_image.lock(|next_image| {
-                if *last_changes == *changes {
-                    let mut image_aux = Image::default();
-                    let mut _text;
+        if *last_changes == changes {
+            let mut image_aux = Image::default();
+            let mut _text;
 
-                    // Create a new text style
-                    let text_style = MonoTextStyleBuilder::new()
-                        .font(&IBM437_8X8_REGULAR)
-                        .text_color(color_now)
-                        .background_color(Rgb888::BLACK)
-                        .build();
+            let color_now = match *color_index {
+                0 => Rgb888::RED,
+                1 => Rgb888::GREEN,
+                2 => Rgb888::BLUE,
+                _ => unreachable!(),
+            };
 
-                    // Create a new text object
-                    let text = Text::new(text, Point::new(*offset, 7), text_style);
+            // Create a new text style
+            let text_style = MonoTextStyleBuilder::new()
+                .font(&IBM437_8X8_REGULAR)
+                .text_color(color_now)
+                .background_color(Rgb888::BLACK)
+                .build();
 
-                    // Draw the text onto the image
-                    _text = text.draw(&mut image_aux);
+            // Create a new text object
+            let text = Text::new(text, Point::new(*offset, 7), text_style);
 
-                    let image = cx.shared.pool.alloc().unwrap().init(image_aux);
-                    *next_image = Some(image);
+            // Draw the text onto the image
+            _text = text.draw(&mut image_aux);
 
-                    *offset = *offset - 1;
-                    if *offset == -90 {
-                        *offset = 10; // reseting offset
-                        *color_index = (*color_index + 1) % 3;
-                    }
-                } else {
-                    *offset = 10; // reseting offset
+            let image = cx.shared.pool.alloc();
+            if image.is_some() {
+                let image = image.unwrap().init(image_aux);
+
+                // returning the previous next_image to the pool
+                cx.shared.next_image.lock(|next_image| {
                     if let Some(image) = next_image.take() {
                         cx.shared.pool.free(image);
                     }
-                    *last_changes = *changes;
+                });
+
+                cx.shared.next_image.lock(|next_image| {
+                    *next_image = Some(image);
+                });
+
+                *offset = *offset - 1;
+                if *offset == offset_min {
+                    *offset = offset_max; // reseting offset
+                    *color_index = (*color_index + 1) % 3;
                 }
-            });
-        });
+            }
+        } else {
+            *offset = offset_max; // reseting offset
+            *last_changes = changes; // record the current changes into last_changes
+            let next = at + 1.secs(); // wait 1 second after 1 byte received to restart the screensaver (better for the eyes)
+            screensaver::spawn_at(next, next).unwrap();
+            return;
+        }
 
         let next = at + 60.millis();
         screensaver::spawn_at(next, next).unwrap();

@@ -1,9 +1,6 @@
 use crate::{Color, Image};
 use core::convert::Infallible;
-use embedded_graphics::draw_target::DrawTarget;
-use embedded_graphics::pixelcolor::Rgb888;
-use embedded_graphics::prelude::*;
-use embedded_graphics::Pixel;
+use embedded_graphics::{draw_target::DrawTarget, pixelcolor::Rgb888, prelude::*, Pixel};
 
 impl From<Rgb888> for Color {
     fn from(color: Rgb888) -> Self {
