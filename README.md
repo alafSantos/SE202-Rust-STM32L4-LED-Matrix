@@ -1,5 +1,5 @@
 # SE202 Rust - LED Matrix
-The purpose of this repository is to show a little of the Rust course I followed in my master's 1 programme, as part of the Embedded Systems study track I chose. Here it's possible to find a Rust programme for controlling a LED Matrix through a STM32L4 MCU. 
+The purpose of this repository is to show a little of the Rust course I followed in my master's 1 programme, as part of the Embedded Systems study track I chose. Here it's possible to find a Rust programme for controlling a LED Matrix through an STM32L4 MCU. 
 
 ## Meta
  * **Master in Electrical Engineering - Institut Polytechnique de Paris**
